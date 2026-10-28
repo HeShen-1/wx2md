@@ -18,6 +18,8 @@ import { mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
+import { inferCodeLangs } from './code-lang.mjs';
+import { normalizeCodeBlocks } from './code-blocks.mjs';
 import * as cheerio from 'cheerio';
 import { marked } from 'marked';
 import puppeteer from 'puppeteer';
@@ -102,25 +104,8 @@ function slugify(title) {
 function preprocessWeirdTags(content) {
   // mdnice-style horizontal rules live in empty <section data-role="hr">
   content.find('section[data-role="hr"]').replaceWith('<hr>');
-  // WeChat code snippets: <section class="code-snippet__fix"><ul class="code-snippet__line-index">…</ul>
-  // <pre><code>line1</code><code>line2</code></pre></section> — one <code> per
-  // line with no separators. turndown-plugin-gfm's fencedCodeBlock reads only
-  // node.firstChild.textContent, so every line after the first would be lost:
-  // merge the <code> siblings into one <code> with real newlines (and drop the
-  // presentational line-number list). nbsp → space keeps ASCII-art alignment.
-  content.find('ul.code-snippet__line-index').remove();
-  content.find('pre').each((_, el) => {
-    const pre = content.find(el);
-    const codes = pre.children('code');
-    if (codes.length <= 1) return;
-    const text = codes
-      .map((_, c) => content.find(c).text().replace(/ /g, ' ').replace(/[ \t]+$/g, ''))
-      .get()
-      .filter((l) => l.length > 0) // empty <code> = markup junk, not a blank code line
-      .join('\n');
-    pre.html('<code></code>');
-    pre.children('code').text(text);
-  });
+  // all code-block shapes → single <pre><code> (see code-blocks.mjs)
+  normalizeCodeBlocks(content);
   // media embeds are blank custom elements → leave a visible marker
   const kind = { mpvoice: '语音', mpvideo: '视频', mpaudio: '音频', video: '视频', audio: '音频' };
   content.find('mpvoice, mpvideo, mpaudio, video, audio').each((_, el) => {
@@ -587,6 +572,9 @@ console.log(`images : ${imgTotal - imgFailures}/${imgTotal} downloaded${imgFailu
 
 const td = buildTurndown(imgMap);
 let bodyMd = td.turndown(content.html() || '');
+// WeChat editors never carry the code language — infer it per fenced block
+// (code-lang.mjs) so the md ships tagged fences; unknown blocks stay bare.
+bodyMd = inferCodeLangs(bodyMd);
 // collapse the runaway blank lines WeChat markup produces
 bodyMd = bodyMd
   .replace(/\n[ \t]+\n/g, '\n\n') // whitespace-only lines from <br> chains

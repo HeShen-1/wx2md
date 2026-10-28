@@ -5,6 +5,8 @@ import { strict as assert } from 'node:assert';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import * as cheerio from 'cheerio';
+import { normalizeCodeBlocks } from './code-blocks.mjs';
+import { inferCodeLang, inferCodeLangs } from './code-lang.mjs';
 
 // Mirror of the rules in wx2md.mjs. Kept in sync deliberately: if this test
 // and the tool drift apart, the tool is the source of truth — update both.
@@ -75,22 +77,11 @@ function buildTurndown(imgMap) {
 
 const imgMap = new Map([['https://mmbiz.qpic.cn/x/640?wx_fmt=png', 'assets/img-001.png']]);
 const td = buildTurndown(imgMap);
-// Mirror of preprocessWeirdTags() in wx2md.mjs.
+// Mirror of preprocessWeirdTags() in wx2md.mjs. Code-block normalisation is
+// imported from code-blocks.mjs — shared, not mirrored.
 function preprocessWeirdTags($) {
   $('#js_content').find('section[data-role="hr"]').replaceWith('<hr>');
-  $('#js_content').find('ul.code-snippet__line-index').remove();
-  $('#js_content').find('pre').each((_, el) => {
-    const pre = $(el);
-    const codes = pre.children('code');
-    if (codes.length <= 1) return;
-    const text = codes
-      .map((_, c) => $(c).text().replace(/ /g, ' ').replace(/[ \t]+$/g, ''))
-      .get()
-      .filter((l) => l.length > 0) // empty <code> = markup junk, not a blank code line
-      .join('\n');
-    pre.html('<code></code>');
-    pre.children('code').text(text);
-  });
+  normalizeCodeBlocks($('#js_content'));
   const kind = { mpvoice: '语音', mpvideo: '视频', mpaudio: '音频', video: '视频', audio: '音频' };
   $('#js_content').find('mpvoice, mpvideo, mpaudio, video, audio').each((_, el) => {
     const k = kind[el.tagName.toLowerCase()] || '媒体';
@@ -189,6 +180,46 @@ const cases = [
   ['normal weight span untouched', '<p><span style="font-weight: normal;">普通</span></p>', (o) => assert.ok(!o.includes('**'), JSON.stringify(o))],
   ['nested bold spans keep text', '<p><span style="font-weight: bold;">外层<span style="font-weight: bold;">内层</span></span></p>', (o) => { assert.ok(o.includes('外层')); assert.ok(o.includes('内层')); assert.ok(o.includes('**'), JSON.stringify(o)); }],
   ['whitespace bold span skipped', '<p>甲<span style="font-weight: bold;"> </span>乙</p>', (o) => { assert.ok(!o.includes('****')); assert.ok(o.includes('甲')); assert.ok(o.includes('乙')); }],
+  ['mdnice single-code: decoration + token spans + br → fenced, keywords repaired',
+    '<pre data-tool="mdnice编辑器"><span data-cacheurl="" style="display: block;background-image: url(https://mmbiz.qpic.cn/x.svg)"></span><code style="display: -webkit-box;"><span style="color: #5c6370;font-style: italic;line-height: 26px;"><span leaf=""># 框架</span></span><span leaf=""><br  /></span><span style="line-height: 26px;"><span style="color: #c678dd;line-height: 26px;"><span leaf="">class</span></span></span><span style="color: #e6c07b;line-height: 26px;"><span leaf="">Demo</span></span><span leaf="">:</span></span><span leaf=""><br  /></span><span leaf="">&nbsp;&nbsp;&nbsp;&nbsp;</span><span style="line-height: 26px;"><span style="color: #c678dd;"><span leaf="">def</span></span></span><span leaf="">__init__</span><span leaf="">(self):</span><span leaf=""><br  /></span><span leaf="">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;self.x = 1</span></code></pre>',
+    (o) => {
+      assert.ok(o.includes('```\n# 框架\nclass Demo:\n    def __init__(self):\n        self.x = 1\n```'), JSON.stringify(o));
+      assert.ok(!o.includes('classDemo') && !o.includes('def__init__'), 'keyword spacing repaired');
+      assert.ok(!o.includes('*'), 'italic comment spans not promoted inside code');
+    }],
+  ['mdnice decoration after code still removed',
+    '<pre><code><span leaf="">ok(1)</span></code><span style="display: block;background-image: url(https://mmbiz.qpic.cn/x.svg)"></span></pre>',
+    (o) => assert.ok(o.includes('```\nok(1)\n```'), JSON.stringify(o))],
+  ['bare <pre> without <code> keeps text as fenced block',
+    '<pre>┌─────┐\n│ box │\n└─────┘</pre>',
+    (o) => assert.ok(o.includes('```\n┌─────┐\n│ box │\n└─────┘\n```'), JSON.stringify(o))],
+  ['decoration-only <pre> dropped silently',
+    '<p>前文</p><pre><span style="background-image: url(https://x/y.svg)"></span></pre><p>后文</p>',
+    (o) => { assert.ok(o.includes('前文') && o.includes('后文')); assert.ok(!o.includes('```')); }],
+  ['section-wrapped <code> inside <pre> recovered',
+    '<pre><section><code><span leaf="">hi()</span></code></section></pre>',
+    (o) => assert.ok(o.includes('```\nhi()\n```'), JSON.stringify(o))],
+  ['multi-code lines: <br/> inside a line-code keeps both lines',
+    '<section class="code-snippet__fix"><pre><code><span leaf="">a</span><br><span leaf="">b</span></code><code><span leaf="">c</span></code></pre></section>',
+    (o) => assert.ok(o.includes('a\nb\nc'), JSON.stringify(o))],
+  ['java int[] must not gain a space',
+    '<pre><code><span leaf="">int</span><span leaf="">[</span><span leaf="">]</span><span leaf=""> x = 1;</span></code></pre>',
+    (o) => assert.ok(o.includes('int[] x = 1;'), JSON.stringify(o))],
+  ['go func repaired at token boundary',
+    '<pre><code><span leaf="">func</span><span leaf="">main()</span></code></pre>',
+    (o) => assert.ok(o.includes('func main()'), JSON.stringify(o))],
+  ['sql uppercase repaired',
+    '<pre><code><span leaf="">SELECT</span><span leaf="">id</span></code></pre>',
+    (o) => assert.ok(o.includes('SELECT id'), JSON.stringify(o))],
+  ['inline code with span children stays inline',
+    '<p>运行 <code><span leaf="">npm test</span></code> 即可</p>',
+    (o) => assert.ok(o.includes('`npm test`'), JSON.stringify(o))],
+  ['bare <pre> with CJK promo prose degrades to paragraph, not fence',
+    '<p>正文完</p><pre><span leaf="">👆👆👆欢迎关注，一起进步👆👆👆欢迎留言讨论哈🧐点赞、分享、推荐，一键三连，养成习惯👍</span></pre>',
+    (o) => { assert.ok(o.includes('欢迎关注，一起进步'), JSON.stringify(o)); assert.ok(!o.includes('```')); }],
+  ['html entities in bare pre stay escaped',
+    '<pre>a &lt; b &amp;&amp; c &gt; d</pre>',
+    (o) => assert.ok(o.includes('a < b && c > d'), JSON.stringify(o))],
 ];
 
 let failed = 0;
@@ -290,5 +321,56 @@ for (const [name, md, check] of strongCases) {
     console.log(`  FAIL strong: ${name}: ${e.message.split('\n')[0]}`);
   }
 }
+// code-lang: language inference from block text — shared module, exercised
+// directly. Bare-safe default: unknown/prose blocks must return ''.
+const langCases = [
+  ['chinese prompt prose → bare', '介绍一下李白', ''],
+  ['numbered prompt prose → bare', '1. 先分析用户的请求', ''],
+  ['comment-led prompt prose → bare', '# 思考步骤\n首先观察以下案例', ''],
+  ['triple-quote assignment → python', 'prompt = """\n# 角色\n你是一位专家\n"""', 'python'],
+  ['strict json → json', '{"a": 1, "b": [2, 3]}', 'json'],
+  ['smart-quoted json → json', '{\n  ”session_id”: ”abc123”,\n  ”user_id”: ”user_456”\n}', 'json'],
+  ['jsonl multi-line → json', '{"data":{"instruction": "a"}}\n{"data":{"instruction": "b"}}', 'json'],
+  ['wrapped/truncated json → json', '{"data":{"instruction":"我想听音乐\n","_itag_index":""},"label-1":{"results":[]}}', 'json'],
+  ['cjk unicode arrow prose → bare', '用户消息 → 意图识别 → 记忆维护', ''],
+  ['cjk ascii-arrow prose → bare', '输入 => 处理 => 输出', ''],
+  ['capitalized prose colon lines → bare', 'Note: hello there\nWarning: it may fail', ''],
+  ['lowercase yaml pairs → yaml', 'server_name: demo\nport: 8080', 'yaml'],
+  ['shell verbs → bash', 'cd /data && export TMPDIR=/tmp\npip install requests', 'bash'],
+  ['go → go', 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi")\n}', 'go'],
+  ['java → java', 'public class Demo {\n    public static void main(String[] args) {}\n}', 'java'],
+  ['python class not stolen by java', 'class A:\n    def b(self):\n        pass', 'python'],
+  ['chatml template → bare', '<|im_start|>system\n你是一个意图识别专家', ''],
+];
+for (const [name, code, want] of langCases) {
+  try {
+    assert.equal(inferCodeLang(code), want, `got ${JSON.stringify(inferCodeLang(code))}`);
+    console.log(`  ok   lang: ${name}`);
+  } catch (e) {
+    failed++;
+    console.log(`  FAIL lang: ${name}: ${e.message.split('\n')[0]}`);
+  }
+}
+
+// inferCodeLangs: full-document fence tagging
+const docCases = [
+  ['bare python fence tagged, prose fence untouched',
+    '```\nclass A:\n    def b(self):\n        pass\n```\n\n```\n介绍一下李白\n```',
+    (o) => { assert.ok(o.includes('```python\nclass A:'), JSON.stringify(o)); assert.ok(o.includes('```\n介绍一下李白\n```')); }],
+  ['already-tagged fences untouched',
+    '```json\n{"a": 1}\n```\n```\nplain\n```',
+    (o) => { assert.ok(o.includes('```json\n{"a": 1}\n```')); assert.ok(o.includes('```\nplain\n```')); }],
+];
+for (const [name, md, check] of docCases) {
+  try {
+    check(inferCodeLangs(md));
+    console.log(`  ok   langs: ${name}`);
+  } catch (e) {
+    failed++;
+    console.log(`  FAIL langs: ${name}: ${e.message.split('\n')[0]}`);
+  }
+}
+
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exit(failed ? 1 : 0);

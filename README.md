@@ -83,6 +83,9 @@ md 是唯一源:PDF 由 md 渲染而来,两者内容必然一致。
 | `mp-common-profile/mpprofile/mp-style-type/iframe` | 移除 | turndown remove |
 | 标题/列表/引用/代码/表格/链接/粗斜体 | 原生 md 语法 | turndown + gfm(`emDelimiter:'*'`,中文安全) |
 | `pre` 含多个 `<code>`(微信 code-snippet) | 合并为单个 `<code>`,行间补 `\n` | 预处理(gfm 的 fencedCodeBlock 只读 firstChild,不合并则第 2 行起全部丢失;同时删 `code-snippet__line-index` 行号列表、空 `<code>` 过滤、nbsp 转空格) |
+| | `pre` 首子元素非 `<code>`(mdnice 装饰条) + 单 `<code>` | 删装饰 span、`<br/>`→`\n`、nbsp→空格、按 token 边界补回被微信剥掉的关键词空格(`def__init__`→`def __init__`,词表覆盖 py/go/java/c/js/sql,逻辑在 `code-blocks.mjs`) | 预处理(gfm fencedCodeBlock 要求 pre.firstChild 是 `<code>`,否则整块退化为一行行内代码);嵌套 `<section><code>` 一并下钻恢复 |
+| 裸 `<pre>`(无 `<code>`) | 按内容分派:CJK 标点散文(文末推广语/诗句)→还原段落;代码样文本(ASCII 图)→围栏 | 预处理(旧版:含 code 的 pre 未命中规则时静默丢弃/降级,纯装饰 pre 删除) |
+| 围栏代码块语言标注 | 内容启发式推断(python/json/js/go/java/sql/bash/yaml),推断不出保持裸围栏 | `code-lang.mjs`,turndown 后处理 |
 | `<strong>`(输出后处理) | `<strong>…</strong>` | `**` 贴中文标点违反 CommonMark 侧翼规则(如 `的**“x”**` 打不开、`】：**` 闭不上,Obsidian 显示原始星号),换 HTML 标签;行内代码与围栏代码块跳过 |
 | `<span style="font-weight: bold/600…">` | `<strong>`(预处理) | 公众号编辑器用行内样式而非 `<strong>` 表达加粗(实测一篇文章 229 处样式加粗 vs 10 个 `<strong>`),turndown 会剥掉样式导致加粗整体丢失;`font-style: italic` 同理升为 `<em>`;纯空白与包块级元素的 span 跳过 |
 
