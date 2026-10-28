@@ -1,0 +1,4 @@
+node_modules/
+*.bak-*
+*.render.html
+.DS_Store

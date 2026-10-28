@@ -1,0 +1,29 @@
+{
+  "name": "wx2md",
+  "version": "0.1.0",
+  "description": "Convert a WeChat official-account article (mp.weixin.qq.com/s/...) to Markdown with local image assets and a typeset PDF.",
+  "type": "module",
+  "license": "MIT",
+  "author": "HeShen-1",
+  "homepage": "https://github.com/HeShen-1/wx2md#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeShen-1/wx2md.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HeShen-1/wx2md/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "wx2md": "./wx2md.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "marked": "^14.0.0",
+    "puppeteer": "^23.0.0",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  }
+}
