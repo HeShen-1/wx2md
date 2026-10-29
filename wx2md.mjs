@@ -4,24 +4,28 @@
  * to Markdown (with local image assets) and a typeset PDF.
  *
  * Usage:
- *   node wx2md.mjs <article-url> [--out <dir>] [--no-pdf] [--keep-html]
+ *   node wx2md.mjs <article-url> [--out <dir>] [--no-pdf]
+ *
+ *   Default --out: the Obsidian vault folder for WeChat saves
+ *   (DEFAULT_OUT_ROOT below).
  *
  * Output layout:
- *   <out>/<title>/<title>.md
+ *   <out>/<title>/<title>.md         (clean markdown, images localized)
  *   <out>/<title>/assets/img-001.jpg ...
- *   <out>/<title>/<title>.pdf        (unless --no-pdf)
+ *   <out>/<title>/<title>.html       (original WeChat styling)
+ *   <out>/<title>/<title>.pdf        (unless --no-pdf; rendered from the HTML)
  *
- * The Markdown file is the source of truth; the PDF is rendered from it,
- * so both always carry identical content.
+ * The markdown is the clean text source; the HTML/PDF render the ORIGINAL
+ * styled DOM (brand colors, cards, quote boxes survive). Content is identical
+ * across all three.
  */
-import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import { inferCodeLangs } from './code-lang.mjs';
 import { normalizeCodeBlocks } from './code-blocks.mjs';
 import * as cheerio from 'cheerio';
-import { marked } from 'marked';
 import puppeteer from 'puppeteer';
 
 const UA =
@@ -39,9 +43,9 @@ const opt = (name, dflt) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : dflt;
 };
-const OUT_ROOT = path.resolve(opt('--out', process.cwd()));
+const DEFAULT_OUT_ROOT = process.env.WX2MD_OUT || '/home/river/ObsidianNote/work/AI文章/微信公众号';
+const OUT_ROOT = path.resolve(opt('--out', DEFAULT_OUT_ROOT));
 const WANT_PDF = !argv.includes('--no-pdf');
-const KEEP_HTML = argv.includes('--keep-html');
 const FETCHED = new Date().toISOString().slice(0, 10);
 
 // -------------------------------------------------------------- helpers ----
@@ -396,8 +400,20 @@ function normalizeDecorativeLines(md) {
     .replace(/^[ \t]*\\?[-—=_*·~]{3,}[ \t ]*$/gm, '---');
 }
 
+// mdnice/WeChat lists carry a literal bullet glyph ("<li><span>•&nbsp;</span>…")
+// inside every item; turndown adds the real md marker, so the glyph renders as
+// a doubled bullet ("- • text"). Strip the glyph only right after a list
+// marker — bare "• text" paragraphs outside lists stay untouched.
+function dedupeListGlyphs(md) {
+  return md.replace(
+    /^(\s*(?:[-*+]|\d+[.)])[ \t]+)[•·●○■□▪◆◇▲△▼▽][ \t ]*/gm,
+    '$1',
+  );
+}
+
 // Turn list items that exactly match a heading into in-page anchor links.
-// Obsidian resolves `#heading text`; the PDF renderer sets matching ids.
+// Obsidian resolves `#heading text`; anchors live in Obsidian only — the
+// styled PDF renders the original DOM, not the markdown.
 function linkTocItems(md) {
   const heads = [...md.matchAll(/^#{2,6} (.+)$/gm)].map((m) => m[1].trim());
   if (!heads.length) return md;
@@ -442,7 +458,23 @@ function dedupeInlineLinks(md) {
 }
 
 // ------------------------------------------------------------------ pdf ----
-function pdfHtml(bodyHtml, meta) {
+// HTML/PDF render the ORIGINAL WeChat DOM snapshot (brand colors, cards, quote
+// boxes survive), not the clean markdown. Our CSS is a fallback layer that the
+// article's inline styles override — except font-family, which is forced back
+// onto every element (zero-glyph note below).
+function localizeStyledImages(src, map) {
+  const $s = cheerio.load(`<div id="wx-root">${src}</div>`);
+  $s('#wx-root img').each((_, el) => {
+    const $img = $s(el);
+    const key = $img.attr('data-src') || $img.attr('src') || '';
+    const target = map.get(key) || key;
+    if (target) $img.attr('src', target);
+    $img.removeAttr('data-src');
+  });
+  return $s('#wx-root').html();
+}
+
+function styledHtml(bodyHtml, meta) {
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <title>${escapeHtml(meta.title)}</title>
@@ -451,37 +483,31 @@ function pdfHtml(bodyHtml, meta) {
   * { box-sizing: border-box; }
   body {
     font-family: "Noto Sans CJK SC","WenQuanYi Micro Hei","WenQuanYi Zen Hei","PingFang SC","Microsoft YaHei",sans-serif;
-    font-size: 14.5px; line-height: 1.9; color: #1f2328; margin: 0;
+    font-size: 16px; line-height: 1.8; color: #1f2328; margin: 0;
     text-rendering: optimizeLegibility;
   }
   /* WeChat inline styles bring their own font stacks (mp-quote, "PingFang SC", …)
      with no installed match; headless Chrome then draws ZERO glyphs instead of
-     falling back — table cells go completely blank. Force the doc font back on
-     every element; code/pre (and their children) keep the mono stack. */
+     falling back — whole blocks go blank. Force the doc font back on every
+     element; code/pre (and their children) keep the mono stack. Colors and
+     backgrounds from the article survive untouched. */
   .doc :not(pre):not(code):not(pre *):not(code *) { font-family: inherit !important; }
-  .doc { padding: 6px 2px 24px; }
+  .doc { max-width: 720px; margin: 0 auto; padding: 6px 2px 24px; overflow-wrap: break-word; }
   header.doc-head { border-bottom: 2px solid #d0d7de; margin-bottom: 28px; padding-bottom: 14px; }
   h1.doc-title { font-size: 24px; line-height: 1.45; margin: 0 0 10px; }
   .doc-meta { font-size: 11.5px; color: #57606a; line-height: 1.7; }
   .doc-meta a { color: #0969da; text-decoration: none; }
-  h1,h2,h3,h4 { line-height: 1.5; margin: 1.5em 0 0.6em; }
-  h2 { font-size: 19px; border-bottom: 1px solid #eaeef2; padding-bottom: 6px; }
-  h3 { font-size: 16.5px; }
-  p { margin: 0.65em 0; text-align: justify; }
-  img { max-width: 88%; display: block; margin: 14px auto 4px; }
-  p[align="center"] { color: #57606a; font-size: 12.5px; line-height: 1.6; margin: 2px auto 22px; }
-  a { color: #0969da; }
-  blockquote { margin: 1em 0; padding: 2px 14px; border-left: 3px solid #d0d7de; color: #57606a; background: #f6f8fa; }
+  /* fallbacks only — the article's inline styles override all of this */
+  p { margin: 0.65em 0; }
+  img { max-width: 100%; height: auto !important; }
+  hr { border: none; border-top: 1px solid #d0d7de; margin: 1.6em auto; width: 60%; }
+  blockquote { margin: 1em 0; padding: 2px 14px; border-left: 3px solid #d0d7de; }
+  pre { background: #f6f8fa; padding: 12px 14px; border-radius: 6px; overflow-x: hidden; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
   code { font-family: "WenQuanYi Micro Hei Mono","Noto Sans Mono CJK SC",ui-monospace,monospace; font-size: 0.88em; background: #f6f8fa; padding: 2px 5px; border-radius: 4px; }
-  pre { background: #f6f8fa; padding: 12px 14px; border-radius: 6px; overflow-x: hidden; line-height: 1.6; }
   pre code { background: none; padding: 0; }
   table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 13px; }
   th, td { border: 1px solid #d8dee4; padding: 6px 10px; text-align: left; }
-  th { background: #f6f8fa; }
-  hr { border: none; border-top: 1px solid #d0d7de; margin: 1.6em auto; width: 60%; }
-  ul, ol { padding-left: 1.6em; }
-  li { margin: 0.3em 0; }
-  strong { color: #111; }
+  a { color: #0969da; }
 </style></head>
 <body><div class="doc">
 <header class="doc-head">
@@ -500,18 +526,6 @@ ${bodyHtml}
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
-
-// Heading ids match linkTocItems()'s hrefs (heading text verbatim, URL-encoded),
-// so the in-page TOC links work in the exported PDF.
-marked.use({
-  renderer: {
-    heading({ tokens, depth }) {
-      const text = this.parser.parseInline(tokens);
-      const id = text.replace(/<[^>]+>/g, '').replace(/"/g, '&quot;').replace(/\s+/g, ' ').trim();
-      return `<h${depth} id="${id}">${text}</h${depth}>\n`;
-    },
-  },
-});
 
 async function renderPdf(htmlPath, pdfPath) {
   const browser = await puppeteer.launch({
@@ -547,6 +561,11 @@ if (!content.length) {
 }
 content.find('script, style, noscript, mpchecktext, iformix').remove();
 preprocessWeirdTags(content);
+// Snapshot BEFORE promoteStyledEmphasis/saveFormulas rewrite emphasis and
+// formulas: the styled HTML/PDF render this original DOM (inline colors,
+// cards, inline SVGs), while the markdown pipeline continues on the mutated
+// tree below.
+const styledBodySrc = content.html() || '';
 promoteStyledEmphasis(content);
 
 const meta = pickMeta(html, $);
@@ -581,6 +600,7 @@ bodyMd = bodyMd
   .replace(/\n{3,}/g, '\n\n')
   .trim();
 bodyMd = normalizeDecorativeLines(bodyMd);
+bodyMd = dedupeListGlyphs(bodyMd);
 bodyMd = linkTocItems(bodyMd);
 bodyMd = dedupeInlineLinks(bodyMd).replace(/\n{3,}/g, '\n\n') + '\n';
 bodyMd = cjkSafeStrong(bodyMd);
@@ -591,18 +611,16 @@ const mdChars = bodyMd.replace(/\s/g, '').length;
 console.log(`md     : ${mdPath} (${mdChars} non-space chars)`);
 
 if (WANT_PDF) {
-  const bodyHtml = marked.parse(bodyMd);
-  const htmlPath = path.join(outDir, `${slugify(meta.title)}.render.html`);
-  await writeFile(htmlPath, pdfHtml(bodyHtml, meta), 'utf8');
+  const htmlPath = path.join(outDir, `${slugify(meta.title)}.html`);
+  await writeFile(htmlPath, styledHtml(localizeStyledImages(styledBodySrc, imgMap), meta), 'utf8');
+  console.log(`html   : ${htmlPath}`);
   const pdfPath = path.join(outDir, `${slugify(meta.title)}.pdf`);
   try {
     await renderPdf(htmlPath, pdfPath);
     console.log(`pdf    : ${pdfPath}`);
   } catch (e) {
     console.warn(`! pdf rendering failed: ${e.message}`);
-    console.warn(`  markdown + assets are still complete; re-run without --no-pdf later.`);
-  } finally {
-    if (!KEEP_HTML) await rm(htmlPath, { force: true });
+    console.warn(`  styled html + markdown + assets are complete; re-run without --no-pdf later.`);
   }
 }
 

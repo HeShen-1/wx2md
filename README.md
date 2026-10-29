@@ -1,6 +1,6 @@
 # wx2md
 
-微信公众号文章 → Markdown(图片本地化)+ 排版 PDF,一条管线。
+微信公众号文章 → 干净 Markdown(图片本地化)+ 原文配色 HTML/PDF,一条管线。
 
 ## 安装
 
@@ -44,19 +44,19 @@ frontmatter 提供 title/account/author/date/source/fetched;Obsidian callout 转
 
 | 参数 | 说明 |
 | --- | --- |
-| `--out <dir>` | 输出根目录,默认当前目录 |
-| `--no-pdf` | 只出 md + 图片,不出 PDF |
-| `--keep-html` | 保留中间渲染 HTML(调试用) |
+| `--out <dir>` | 输出根目录;默认本机 Obsidian 收藏目录 `AI文章/微信公众号`(源码内 `DEFAULT_OUT_ROOT`,可用 env `WX2MD_OUT` 覆盖) |
+| `--no-pdf` | 只出 md + html + 图片,不出 PDF |
 
 ## 输出结构
 
 ```
-<out>/<标题>/<标题>.md     # 主产物,frontmatter 带标题/公众号/日期/原文链接
-<out>/<标题>/<标题>.pdf    # 从 md 渲染,A4,带页码
-<out>/<标题>/assets/       # 全部图片,md 引相对路径
+<out>/<标题>/<标题>.md     # 干净 md,笔记用,frontmatter 带标题/公众号/日期/原文链接
+<out>/<标题>/<标题>.html   # 原文配色渲染(品牌色/色块卡片/引用框),浏览器即读
+<out>/<标题>/<标题>.pdf    # 从 html 渲染,A4,带页码,样式同 html
+<out>/<标题>/assets/       # 全部图片,md 与 html 共用
 ```
 
-md 是唯一源:PDF 由 md 渲染而来,两者内容必然一致。
+md 是干净的文本源(纯 markdown,不携带样式);HTML/PDF 不由 md 渲染,而是直接采用转换前的微信原 DOM,原文配色与卡片布局得以保留。三路产物文字内容一致。
 
 ## 已知限制
 
